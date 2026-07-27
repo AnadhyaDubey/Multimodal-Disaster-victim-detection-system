@@ -1,0 +1,29 @@
+__pycache__/
+*.pyc
+venv/
+.env
+mlruns/
+data/
+*.pt
+*.pth
+# Shared Detection Schema — Module 1
+
+Both vision/ and audio/ must output confidence scores in this shape,
+so fusion/ can combine them without either side needing to know the
+other's internals.
+
+## Per-detection output (JSON)
+{
+  "image_id": "str",
+  "visual_confidence": 0.0,
+  "audio_confidence": 0.0,
+  "occlusion_pct_actual": 0.0
+}
+
+## Notes
+- visual_confidence: 0-1 float, from vision/ (YOLO detection confidence)
+- audio_confidence: 0-1 float, from audio/ (tap-vs-noise classifier confidence)
+  - defaults to 0.0 if no audio sample exists yet — lets vision/ be tested
+    independently before audio/ is ready
+- occlusion_pct_actual: 0-100 float, from vision/'s occlusion augmentation log
+- fusion/combine_confidence.py takes visual_confidence + audio_confidence -> one fused score
