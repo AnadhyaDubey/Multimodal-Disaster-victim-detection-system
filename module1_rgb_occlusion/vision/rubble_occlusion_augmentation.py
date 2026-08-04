@@ -206,19 +206,41 @@ def yolo_to_xyxy(row, img_w, img_h):
 # 5. Main batch pipeline
 # ----------------------------------------------------------------------
 def process_dataset(images_dir: Path, labels_dir: Path, out_dir: Path,
-                     levels=(25, 50, 75), seed=42):
+                     levels=(25, 50, 75), seed=42, max_images=None,
+                     max_persons_per_image=None):
+    """
+    max_images: process only the first N images (sorted) instead of the
+      whole folder -- use this to get a fast, usable subset now, then run
+      the full set separately later (e.g. overnight, or once, kept
+      persistent in Drive so you never redo it).
+    max_persons_per_image: cap how many person boxes get occluded per
+      image -- CrowdHuman images can have 20+ people each, and each box
+      costs several texture-generation calls. Capping this (e.g. to 5)
+      dramatically cuts runtime on crowd-heavy images, at the cost of
+      only occluding a subset of the people in those specific photos.
+    """
     rng = np.random.default_rng(seed)
     out_dir.mkdir(parents=True, exist_ok=True)
     log_rows = []
 
     img_paths = sorted([p for p in images_dir.glob("*") if p.suffix.lower() in
                          (".jpg", ".jpeg", ".png")])
+    if max_images is not None:
+        img_paths = img_paths[:max_images]
 
     for level in levels:
         (out_dir / f"occ_{level}pct" / "images").mkdir(parents=True, exist_ok=True)
         (out_dir / f"occ_{level}pct" / "labels").mkdir(parents=True, exist_ok=True)
 
-    for img_path in img_paths:
+    try:
+        from tqdm import tqdm
+        img_iter = tqdm(img_paths, desc="Augmenting", unit="img")
+    except ImportError:
+        img_iter = img_paths
+        print(f"(tqdm not installed -- processing {len(img_paths)} images with no "
+              f"progress bar; pip install tqdm for live progress)")
+
+    for img_path in img_iter:
         image = cv2.imread(str(img_path))
         if image is None:
             continue
@@ -228,6 +250,8 @@ def process_dataset(images_dir: Path, labels_dir: Path, out_dir: Path,
         person_rows = [r for r in rows if r[0] == 0]  # assumes class 0 = person
         if not person_rows:
             continue
+        if max_persons_per_image is not None:
+            person_rows = person_rows[:max_persons_per_image]
 
         for level in levels:
             occluded = image.copy()
@@ -316,6 +340,10 @@ if __name__ == "__main__":
     parser.add_argument("--demo", action="store_true",
                          help="Generate synthetic person images first, then run the pipeline on them.")
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--max_images", type=int, default=None,
+                         help="Process only the first N images -- use for a fast subset run.")
+    parser.add_argument("--max_persons_per_image", type=int, default=None,
+                         help="Cap person boxes occluded per image -- speeds up crowd-heavy photos.")
     args = parser.parse_args()
 
     out_dir = Path(args.out_dir)
@@ -326,4 +354,5 @@ if __name__ == "__main__":
     else:
         assert args.images_dir and args.labels_dir, "Provide --images_dir and --labels_dir (or use --demo)."
         process_dataset(Path(args.images_dir), Path(args.labels_dir), out_dir,
-                         levels=args.levels, seed=args.seed)
+                         levels=args.levels, seed=args.seed, max_images=args.max_images,
+                         max_persons_per_image=args.max_persons_per_image)
