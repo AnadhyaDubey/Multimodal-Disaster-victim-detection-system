@@ -33,6 +33,10 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
+import matplotlib
+matplotlib.use("Agg")  # headless-safe, no display needed (works in Colab and scripts alike)
+import matplotlib.pyplot as plt
+import seaborn as sns
 from ultralytics import YOLO
 
 
@@ -169,7 +173,68 @@ def run_stratified_eval(occluded_root: Path, weights: str, log_csv: Path,
     pd.DataFrame(per_image_rows).to_csv(out_dir / "per_image_results.csv", index=False)
     print(f"\nSaved: {out_dir / 'stratified_summary.csv'} and per_image_results.csv")
 
+    plot_stratified_bars(summary_rows, out_dir)
+    plot_occlusion_distribution(log, out_dir)
+
     return summary_rows
+
+
+def plot_stratified_bars(summary_rows, out_dir: Path):
+    """
+    Grouped bar chart: recall + precision side by side per occlusion bucket.
+    This is the headline chart -- shows whether performance holds up as
+    occlusion gets harder, or collapses.
+    """
+    df = pd.DataFrame(summary_rows)
+    df = df.dropna(subset=["recall", "precision"])  # skip empty buckets (e.g. 0-20%, 80-100%)
+    if df.empty:
+        print("No non-empty buckets to plot.")
+        return
+
+    long_df = df.melt(id_vars=["bucket"], value_vars=["recall", "precision"],
+                       var_name="metric", value_name="value")
+
+    sns.set_style("whitegrid")
+    fig, ax = plt.subplots(figsize=(8, 5))
+    sns.barplot(data=long_df, x="bucket", y="value", hue="metric",
+                palette=["#2a78d6", "#eb6834"], ax=ax)
+    ax.set_ylim(0, 1)
+    ax.set_xlabel("Actual occlusion bucket")
+    ax.set_ylabel("Score")
+    ax.set_title("Recall and precision by actual occlusion severity")
+    ax.legend(title="")
+
+    # label each bar with its value -- easier to read than eyeballing bar height
+    for container in ax.containers:
+        ax.bar_label(container, fmt="%.2f", padding=2)
+
+    fig.tight_layout()
+    out_path = out_dir / "stratified_plot.png"
+    fig.savefig(out_path, dpi=150)
+    plt.close(fig)
+    print(f"Saved plot: {out_path}")
+
+
+def plot_occlusion_distribution(log: pd.DataFrame, out_dir: Path):
+    """
+    Histogram of ACTUAL occlusion % achieved, split by nominal target level.
+    Secondary/supporting plot -- sanity-checks that the augmentation script's
+    randomized blobs actually landed close to their intended targets.
+    """
+    sns.set_style("whitegrid")
+    fig, ax = plt.subplots(figsize=(8, 5))
+    sns.histplot(data=log, x="actual_occlusion_pct", hue="nominal_occlusion_pct",
+                 bins=20, palette=["#2a78d6", "#1baf7a", "#eb6834"], ax=ax,
+                 multiple="layer", alpha=0.6)
+    ax.set_xlabel("Actual occlusion % (measured)")
+    ax.set_ylabel("Count")
+    ax.set_title("Actual vs nominal occlusion -- augmentation script sanity check")
+
+    fig.tight_layout()
+    out_path = out_dir / "occlusion_distribution.png"
+    fig.savefig(out_path, dpi=150)
+    plt.close(fig)
+    print(f"Saved plot: {out_path}")
 
 
 if __name__ == "__main__":
