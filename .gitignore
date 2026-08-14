@@ -26,4 +26,4 @@ other's internals.
   - defaults to 0.0 if no audio sample exists yet — lets vision/ be tested
     independently before audio/ is ready
 - occlusion_pct_actual: 0-100 float, from vision/'s occlusion augmentation log
-- fusion/combine_confidence.py takes visual_confidence + audio_confidence -> one fused score
+- fusion/combine_confidence.py takes visual_confidence + audio_confidence -> one fused scoremodule1_rgb_occlusion/audio/recordings/
