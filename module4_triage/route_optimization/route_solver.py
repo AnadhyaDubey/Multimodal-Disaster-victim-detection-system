@@ -1,162 +1,151 @@
-"""
-route_solver.py
-------------------
-Module 4 (stretch goal) - Route optimization for rescue teams.
-
-Given the GPS coordinates of multiple detected victims, this script:
-    1. Fetches real driving distances/times between all victim pairs
-       using the Google Maps Distance Matrix API.
-    2. Solves a Traveling Salesman Problem (TSP) to find the most
-       efficient visiting order, respecting triage priority.
-    3. Renders the optimized route on an interactive map (using Folium)
-       that can be viewed in a browser or embedded in the dashboard.
-
-Setup (one-time):
-    pip install googlemaps folium networkx
-
-    Get a free Google Maps API key:
-    1. https://console.cloud.google.com/ -> create a project
-    2. Enable "Distance Matrix API" and "Directions API"
-    3. Create an API key under "Credentials"
-    4. export GOOGLE_MAPS_API_KEY="your-key-here"
-
-Usage:
-    from route_solver import optimize_route, render_route_map
-
-    victims = [
-        {"victim_id": "V01", "lat": 28.6139, "lng": 77.2090, "predicted_rank": 1},
-        {"victim_id": "V02", "lat": 28.6145, "lng": 77.2100, "predicted_rank": 2},
-        ...
-    ]
-    rescue_start = (28.6100, 77.2050)  # rescue team's current location
-
-    ordered_route = optimize_route(victims, rescue_start)
-    render_route_map(ordered_route, rescue_start, output_path="route_map.html")
-"""
-
-import os
+import argparse
 import itertools
+import json
+import math
 
-import googlemaps
 import folium
-import networkx as nx
+import requests
 
 
-def _get_client():
-    api_key = os.environ.get("GOOGLE_MAPS_API_KEY")
-    if not api_key:
-        raise EnvironmentError(
-            "GOOGLE_MAPS_API_KEY environment variable not set. "
-            "Run: export GOOGLE_MAPS_API_KEY='your-key-here'"
-        )
-    return googlemaps.Client(key=api_key)
+def haversine_km(a, b):
+    lat1, lon1 = math.radians(a[0]), math.radians(a[1])
+    lat2, lon2 = math.radians(b[0]), math.radians(b[1])
+    dlat, dlon = lat2 - lat1, lon2 - lon1
+    h = math.sin(dlat / 2) ** 2 + math.cos(lat1) * math.cos(lat2) * math.sin(dlon / 2) ** 2
+    return 2 * 6371 * math.asin(math.sqrt(h))
 
 
-def build_distance_matrix(locations):
-    """
-    Fetches real driving distances (in meters) between every pair of
-    locations using the Google Maps Distance Matrix API.
-
-    locations: list of (lat, lng) tuples, index 0 is the rescue team's
-    starting point, the rest are victim locations.
-
-    Returns: 2D list (matrix) of distances in meters.
-    """
-    gmaps = _get_client()
-    result = gmaps.distance_matrix(locations, locations, mode="driving")
-
-    n = len(locations)
-    matrix = [[0] * n for _ in range(n)]
-    for i, row in enumerate(result["rows"]):
-        for j, element in enumerate(row["elements"]):
-            matrix[i][j] = element["distance"]["value"] if element["status"] == "OK" else float("inf")
-
+def build_distance_matrix_demo(coords):
+    n = len(coords)
+    matrix = [[0.0] * n for _ in range(n)]
+    for i in range(n):
+        for j in range(n):
+            if i != j:
+                matrix[i][j] = haversine_km(coords[i], coords[j])
     return matrix
 
 
-def optimize_route(victims, rescue_start):
-    """
-    Solves a small TSP over the rescue-start point and all victim
-    locations, to find the shortest route visiting every victim once.
-
-    For small victim counts (typical triage scenario, <10), this uses
-    brute-force permutation search via networkx's helper, which is exact
-    and fast enough at this scale.
-
-    victims: list of victim dicts, each with "lat", "lng", "victim_id"
-    rescue_start: (lat, lng) tuple
-
-    Returns: list of victim dicts in optimized visiting order.
-    """
-    locations = [rescue_start] + [(v["lat"], v["lng"]) for v in victims]
-    matrix = build_distance_matrix(locations)
-
-    n = len(locations)
-    graph = nx.complete_graph(n)
-    for i, j in itertools.combinations(range(n), 2):
-        graph[i][j]["weight"] = matrix[i][j]
-        graph[j][i]["weight"] = matrix[j][i]
-
-    # networkx's TSP solver (Christofides-based approximation, good enough
-    # for small victim counts and much faster than exact brute force).
-    tsp_order = nx.approximation.traveling_salesman_problem(
-        graph, weight="weight", cycle=False
-    )
-
-    # tsp_order includes index 0 (rescue start) - drop it and map the rest
-    # back to victim dicts, in visiting order.
-    victim_order_indices = [i for i in tsp_order if i != 0]
-    ordered_victims = [victims[i - 1] for i in victim_order_indices]
-
-    return ordered_victims
+def build_distance_matrix_osrm(coords, timeout=10):
+    coord_str = ";".join(f"{lon},{lat}" for lat, lon in coords)
+    url = f"http://router.project-osrm.org/table/v1/driving/{coord_str}?annotations=distance"
+    resp = requests.get(url, timeout=timeout)
+    resp.raise_for_status()
+    data = resp.json()
+    if data.get("code") != "Ok":
+        raise RuntimeError(f"OSRM table request failed: {data}")
+    return [[d / 1000.0 for d in row] for row in data["distances"]]
 
 
-def render_route_map(ordered_victims, rescue_start, output_path="route_map.html"):
-    """
-    Renders the rescue team's optimized route on an interactive Folium
-    map, with numbered markers showing the visiting order.
+def get_route_geometry_osrm(coord_a, coord_b, timeout=10):
+    url = (f"http://router.project-osrm.org/route/v1/driving/"
+           f"{coord_a[1]},{coord_a[0]};{coord_b[1]},{coord_b[0]}?overview=full&geometries=geojson")
+    resp = requests.get(url, timeout=timeout)
+    resp.raise_for_status()
+    data = resp.json()
+    if data.get("code") != "Ok":
+        return [coord_a, coord_b]
+    coords = data["routes"][0]["geometry"]["coordinates"]
+    return [(lat, lon) for lon, lat in coords]
 
-    Saves an HTML file that can be opened in any browser.
-    """
-    m = folium.Map(location=rescue_start, zoom_start=14)
 
-    folium.Marker(
-        rescue_start,
-        popup="Rescue Team Start",
-        icon=folium.Icon(color="blue", icon="home"),
-    ).add_to(m)
+def solve_tsp_bruteforce(distance_matrix, start=0):
+    n = len(distance_matrix)
+    others = [i for i in range(n) if i != start]
+    best_order, best_dist = None, float("inf")
+    for perm in itertools.permutations(others):
+        order = [start] + list(perm)
+        dist = sum(distance_matrix[order[i]][order[i + 1]] for i in range(len(order) - 1))
+        if dist < best_dist:
+            best_dist, best_order = dist, order
+    return best_order, best_dist
 
-    route_points = [rescue_start]
-    for order, victim in enumerate(ordered_victims, start=1):
-        location = (victim["lat"], victim["lng"])
-        route_points.append(location)
+
+def solve_tsp_nearest_neighbor(distance_matrix, start=0):
+    n = len(distance_matrix)
+    visited = [start]
+    unvisited = set(range(n)) - {start}
+    total_dist = 0.0
+    current = start
+    while unvisited:
+        nxt = min(unvisited, key=lambda j: distance_matrix[current][j])
+        total_dist += distance_matrix[current][nxt]
+        visited.append(nxt)
+        unvisited.remove(nxt)
+        current = nxt
+    return visited, total_dist
+
+
+def solve_tsp(distance_matrix, start=0):
+    n = len(distance_matrix)
+    if n <= 8:
+        return solve_tsp_bruteforce(distance_matrix, start)
+    print(f"({n} locations > 8 -- using nearest-neighbor heuristic, not exact optimum)")
+    return solve_tsp_nearest_neighbor(distance_matrix, start)
+
+
+def build_map(victims, order, coords, use_real_geometry=True, out_path="route_map.html"):
+    center_lat = sum(c[0] for c in coords) / len(coords)
+    center_lon = sum(c[1] for c in coords) / len(coords)
+    m = folium.Map(location=[center_lat, center_lon], zoom_start=13)
+
+    for rank, idx in enumerate(order):
+        v = victims[idx]
         folium.Marker(
-            location,
-            popup=f"Stop {order}: {victim['victim_id']} "
-                  f"(priority rank {victim.get('predicted_rank', '?')})",
-            icon=folium.Icon(color="red", icon="info-sign"),
+            coords[idx],
+            popup=f"Stop {rank + 1}: {v.get('victim_id', idx)}",
+            icon=folium.Icon(color="red" if rank == 0 else "blue", icon="info-sign"),
         ).add_to(m)
 
-    folium.PolyLine(route_points, color="blue", weight=4, opacity=0.7).add_to(m)
+    for i in range(len(order) - 1):
+        a_idx, b_idx = order[i], order[i + 1]
+        if use_real_geometry:
+            try:
+                path = get_route_geometry_osrm(coords[a_idx], coords[b_idx])
+            except Exception as e:
+                print(f"  (route geometry fetch failed for segment {i}, using straight line: {e})")
+                path = [coords[a_idx], coords[b_idx]]
+        else:
+            path = [coords[a_idx], coords[b_idx]]
+        folium.PolyLine(path, color="blue", weight=4, opacity=0.7).add_to(m)
 
-    m.save(output_path)
-    print(f"Route map saved to: {output_path} (open in a browser to view)")
+    m.save(out_path)
+    return out_path
+
+
+DEMO_VICTIMS = [
+    {"victim_id": "V01", "lat": 28.6139, "lon": 77.2090},
+    {"victim_id": "V02", "lat": 28.6304, "lon": 77.2177},
+    {"victim_id": "V03", "lat": 28.5921, "lon": 77.2290},
+    {"victim_id": "V04", "lat": 28.6100, "lon": 77.1980},
+    {"victim_id": "V05", "lat": 28.6015, "lon": 77.2350},
+]
 
 
 if __name__ == "__main__":
-    # Quick manual test - replace with real coordinates for a live demo.
-    test_victims = [
-        {"victim_id": "V01", "lat": 28.6139, "lng": 77.2090, "predicted_rank": 2},
-        {"victim_id": "V02", "lat": 28.6155, "lng": 77.2110, "predicted_rank": 1},
-        {"victim_id": "V03", "lat": 28.6120, "lng": 77.2075, "predicted_rank": 3},
-    ]
-    rescue_start = (28.6100, 77.2050)
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--victims", type=str, default=None)
+    parser.add_argument("--demo", action="store_true")
+    parser.add_argument("--start", type=int, default=0)
+    parser.add_argument("--out", type=str, default="route_map.html")
+    args = parser.parse_args()
 
-    print("Solving optimal route...")
-    ordered = optimize_route(test_victims, rescue_start)
+    if args.demo:
+        victims = DEMO_VICTIMS
+        coords = [(v["lat"], v["lon"]) for v in victims]
+        distance_matrix = build_distance_matrix_demo(coords)
+        use_real_geometry = False
+    else:
+        assert args.victims, "Provide --victims victims.json (or use --demo)"
+        with open(args.victims) as f:
+            victims = json.load(f)
+        coords = [(v["lat"], v["lon"]) for v in victims]
+        distance_matrix = build_distance_matrix_osrm(coords)
+        use_real_geometry = True
 
-    print("\nOptimized visiting order:")
-    for i, v in enumerate(ordered, start=1):
-        print(f"  {i}. {v['victim_id']}")
+    order, total_dist = solve_tsp(distance_matrix, start=args.start)
+    route_labels = " -> ".join(victims[i]["victim_id"] for i in order)
+    print(f"\nOptimal route: {route_labels}")
+    print(f"Total distance: {total_dist:.2f} km")
 
-    render_route_map(ordered, rescue_start)
+    out_path = build_map(victims, order, coords, use_real_geometry=use_real_geometry, out_path=args.out)
+    print(f"Map saved: {out_path}")
