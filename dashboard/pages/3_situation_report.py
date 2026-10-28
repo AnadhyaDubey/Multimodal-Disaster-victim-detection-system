@@ -1,7 +1,7 @@
 """
 Situation Report (SITREP) page.
 Takes the victims collected on the Triage page and generates an LLM-written
-SITREP for field rescue teams, using module2_triage/sitrep/generate_sitrep_gemini.py (free Gemini API).
+SITREP for field rescue teams, using module2_triage/sitrep/generate_sitrep_groq.py (free Groq API).
 """
 
 import streamlit as st
@@ -49,30 +49,30 @@ st.markdown("---")
 def _saved_key():
     """Key from .streamlit/secrets.toml (local) or the Secrets box (Streamlit Cloud)."""
     try:
-        return st.secrets["GEMINI_API_KEY"]
+        return st.secrets["GROQ_API_KEY"]
     except Exception:
         return None
 
 
 api_key = (
     _saved_key()
-    or os.environ.get("GEMINI_API_KEY")
-    or st.session_state.get("gemini_api_key")
+    or os.environ.get("GROQ_API_KEY")
+    or st.session_state.get("groq_api_key")
 )
 
 if not api_key:
-    st.info("No saved Gemini key found. Save it once in .streamlit/secrets.toml, or paste it below and press Enter. Free key: aistudio.google.com/apikey")
-    entered_key = st.text_input("Paste your free Gemini API key for this session", type="password")
+    st.info("No saved Groq key found. Save it once in .streamlit/secrets.toml, or paste it below and press Enter. Free key: console.groq.com/keys")
+    entered_key = st.text_input("Paste your free Groq API key for this session", type="password")
     if entered_key:
-        st.session_state["gemini_api_key"] = entered_key
+        st.session_state["groq_api_key"] = entered_key
         api_key = entered_key
 
 st.markdown("---")
 
 if st.button("🧠 Generate SITREP", disabled=not api_key):
     try:
-        # imported lazily so the page still loads even if `google-genai` isn't installed
-        from module2_triage.sitrep.generate_sitrep_gemini import generate_sitrep
+        # imported lazily so the page still loads even if `groq` isn't installed
+        from module2_triage.sitrep.generate_sitrep_groq import generate_sitrep
         with st.spinner("Generating situation report..."):
             report = generate_sitrep(ranked_victims, rank_key="rule_based_rank", api_key=api_key)
         st.markdown("#### Report")
@@ -82,7 +82,7 @@ if st.button("🧠 Generate SITREP", disabled=not api_key):
             unsafe_allow_html=True,
         )
     except ImportError:
-        st.error("The `google-genai` package isn't installed. Run: `pip install google-genai`")
+        st.error("The `groq` package isn't installed. Run: `pip install groq`")
     except EnvironmentError as e:
         st.error(str(e))
     except Exception as e:
