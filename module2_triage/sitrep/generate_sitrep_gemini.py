@@ -9,10 +9,11 @@ Setup:  pip install google-genai
 """
 
 import os
+import time
 
 # Free-tier model names change over time. If you get a "model not found" or
 # quota error, open https://aistudio.google.com and use a model it lists.
-MODEL = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash")
+MODEL = os.environ.get("GEMINI_MODEL", "gemini-3.8-flash")
 
 SYSTEM_PROMPT = (
     "You are a rescue coordination assistant. Given structured data about "
@@ -51,9 +52,21 @@ def generate_sitrep(ranked_victims, rank_key="predicted_rank", api_key=None):
         f"{_format_victims(ranked_victims, rank_key)}\n\n"
         f"Write a SITREP for the field team."
     )
-    response = client.models.generate_content(
-        model=MODEL,
-        contents=prompt,
-        config=types.GenerateContentConfig(system_instruction=SYSTEM_PROMPT),
-    )
-    return response.text
+    # Google's free tier sometimes answers 503 "high demand". That is temporary,
+    # so retry a few times with a growing pause before giving up.
+    last_error = None
+    for attempt in range(4):
+        try:
+            response = client.models.generate_content(
+                model=MODEL,
+                contents=prompt,
+                config=types.GenerateContentConfig(system_instruction=SYSTEM_PROMPT),
+            )
+            return response.text
+        except Exception as e:
+            last_error = e
+            busy = "503" in str(e) or "UNAVAILABLE" in str(e) or "429" in str(e)
+            if not busy or attempt == 3:
+                raise
+            time.sleep(2 * (attempt + 1))   # 2s, 4s, 6s
+    raise last_error
