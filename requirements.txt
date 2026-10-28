@@ -1,0 +1,8 @@
+streamlit
+ultralytics
+opencv-python-headless
+google-genai
+folium
+streamlit-folium
+requests
+pandas
