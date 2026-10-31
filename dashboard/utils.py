@@ -2,7 +2,7 @@
 Shared utilities for the Multimodal Disaster Victim Detection dashboard.
 - Custom HTML/CSS theme injection (Disaster/Rescue: dark navy + orange/red alerts)
 - Model loading + inference placeholders (swap with real YOLO .pt once weights arrive)
-- Fusion / triage scoring placeholder (Module 4 logic lives here until fusion.py is final)
+- Fusion / triage scoring placeholder (Module 2 triage logic lives here until fusion.py is final)
 """
 
 import streamlit as st
@@ -196,56 +196,93 @@ def load_yolo_model(weights_path: str = WEIGHTS_PATH):
         return None
 
 
-def run_occlusion_detection(image, model=None):
+def victim_cues(bbox, occlusion_pct):
     """
-    Run occlusion detection on a PIL/np image using the real YOLO model
-    (single class: 'person'). Falls back to a simulated result if the
-    model isn't loaded yet (e.g. weights missing in this environment).
+    Heuristic 'looks like a victim' score (0-100) for one detected person.
 
-    Returns a dict: {confidence, occlusion_pct, bbox, is_placeholder}
-    occlusion_pct here is an estimate derived from detection confidence
-    as a stand-in until a dedicated occlusion-% output is wired in from
-    the model/training pipeline.
+    Cues: (1) how hidden the person is, (2) body posture from the box shape:
+    a wide box (lying / collapsed) scores higher than a tall one (standing).
+    This is an approximation, NOT a trained victim classifier: the rescuer
+    confirms the final list. A model trained on buried / lying people would
+    replace this function.
     """
+    x1, y1, x2, y2 = bbox
+    aspect = (x2 - x1) / max(y2 - y1, 1e-6)
+    posture = min(1.0, max(0.0, (aspect - 0.45) / 0.6))
+    score = 100 * (0.6 * occlusion_pct / 100 + 0.4 * posture)
+    label = "Likely" if score >= 45 else "Possible" if score >= 30 else "Unlikely"
+    return {"victim_score": round(score, 1), "victim_label": label,
+            "posture": "lying / collapsed" if posture >= 0.5 else "upright"}
+
+
+ACCESS_BONUS = {"easy": 6, "moderate": 0, "difficult": -6}
+
+
+def rescue_order_score(priority_score, time_buried_minutes, accessibility):
+    """
+    Final rescue-order score = medical priority + accessibility + time buried.
+    Easy-to-reach people get a bonus (saved quickly, frees the team for the
+    next one); long burial adds +1 per 30 min, capped at +6.
+    """
+    bonus = ACCESS_BONUS.get(accessibility, 0) + min(6, time_buried_minutes / 30)
+    return round(priority_score + bonus, 1)
+
+
+def run_occlusion_detection(image, model=None, conf=0.10, imgsz=MODEL_IMG_SIZE):
+    """
+    Detect EVERY person in the image (class 'person') and return all of them.
+
+    conf  : minimum confidence kept (low on purpose; the app filters further).
+    imgsz : inference size. 640 matches training; 960 can find smaller people.
+
+    Returns a dict:
+      detections : list of {id, bbox, confidence, occlusion_pct}, most hidden first
+      is_placeholder, no_detection
+      confidence / occlusion_pct / bbox : the single most-confident person
+                                          (kept so older code still works)
+
+    occlusion_pct is still an estimate from detection confidence
+    ((1 - confidence) * 100): a person that is mostly hidden gets a lower
+    confidence. It is a rough proxy, not a measured occlusion value.
+    """
+    detections = []
     if model is not None:
-        results = model.predict(image, imgsz=MODEL_IMG_SIZE, verbose=False)
-        r = results[0]
+        r = model.predict(image, imgsz=imgsz, conf=conf, verbose=False)[0]
+        for box, c in zip(r.boxes.xyxy.tolist(), r.boxes.conf.tolist()):
+            c = float(c)
+            detections.append({
+                "bbox": [round(float(v), 1) for v in box],
+                "confidence": round(c, 2),
+                "occlusion_pct": round((1 - c) * 100, 1),
+            })
+        placeholder = False
+    else:
+        # demo output when no weights are loaded: three made-up people
+        w, h = image.size
+        for _ in range(3):
+            x1, y1 = random.uniform(0.05, 0.6) * w, random.uniform(0.1, 0.5) * h
+            c = round(random.uniform(0.35, 0.95), 2)
+            detections.append({
+                "bbox": [round(x1, 1), round(y1, 1), round(x1 + 0.15 * w, 1), round(y1 + 0.35 * h, 1)],
+                "confidence": c,
+                "occlusion_pct": round((1 - c) * 100, 1),
+            })
+        placeholder = True
 
-        if len(r.boxes) == 0:
-            return {
-                "confidence": 0.0,
-                "occlusion_pct": 0.0,
-                "bbox": None,
-                "is_placeholder": False,
-                "no_detection": True,
-            }
+    for d in detections:
+        d.update(victim_cues(d["bbox"], d["occlusion_pct"]))
+    detections.sort(key=lambda d: d["victim_score"], reverse=True)   # most victim-like first
+    for i, d in enumerate(detections, start=1):
+        d["id"] = i
 
-        # Take the highest-confidence detected person box
-        best_idx = int(r.boxes.conf.argmax())
-        conf = float(r.boxes.conf[best_idx])
-        xyxy = [round(float(v), 1) for v in r.boxes.xyxy[best_idx].tolist()]
-
-        # Rough occlusion estimate: lower detection confidence tends to
-        # correlate with higher occlusion for a model trained this way.
-        # Replace with the real stratified-occlusion metric once available.
-        occlusion_pct = round((1 - conf) * 100, 1)
-
-        return {
-            "confidence": round(conf, 2),
-            "occlusion_pct": occlusion_pct,
-            "bbox": xyxy,
-            "is_placeholder": False,
-        }
-
-    # ---- Placeholder / demo output (model not loaded) ----
-    dummy_confidence = round(random.uniform(0.55, 0.97), 2)
-    dummy_occlusion_pct = round(random.uniform(10, 80), 1)
-    return {
-        "confidence": dummy_confidence,
-        "occlusion_pct": dummy_occlusion_pct,
-        "bbox": [50, 40, 220, 260],
-        "is_placeholder": True,
-    }
+    result = {"detections": detections, "is_placeholder": placeholder,
+              "no_detection": len(detections) == 0}
+    if detections:
+        best = max(detections, key=lambda d: d["confidence"])
+        result.update(confidence=best["confidence"], occlusion_pct=best["occlusion_pct"], bbox=best["bbox"])
+    else:
+        result.update(confidence=0.0, occlusion_pct=0.0, bbox=None)
+    return result
 
 
 # ---------------------------------------------------------------------------

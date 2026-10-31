@@ -1,8 +1,8 @@
-streamlit
-ultralytics
-opencv-python-headless
 groq
 folium
-streamlit-folium
-requests
+opencv-python-headless
 pandas
+requests
+streamlit
+streamlit-folium
+ultralytics
